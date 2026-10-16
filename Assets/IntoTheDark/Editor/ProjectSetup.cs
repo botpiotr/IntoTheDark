@@ -112,6 +112,21 @@ namespace IntoTheDark.EditorTools
         public const string MainMenuScenePath = ScenesFolder + "/MainMenu.unity";
         public const string GameScenePath = ScenesFolder + "/TestRoom.unity";
 
+        /// <summary>
+        /// Avant de régénérer une scène : les scènes générées (salle de test, menu) sont remplacées
+        /// sans question ; on ne demande que pour les autres scènes modifiées.
+        /// </summary>
+        public static bool ConfirmReplaceOpenScenes()
+        {
+            for (int i = 0; i < UnityEngine.SceneManagement.SceneManager.sceneCount; i++)
+            {
+                var scene = UnityEngine.SceneManagement.SceneManager.GetSceneAt(i);
+                if (scene.isDirty && scene.path != GameScenePath && scene.path != MainMenuScenePath)
+                    return UnityEditor.SceneManagement.EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo();
+            }
+            return true;
+        }
+
         /// <summary>Build Settings : menu principal en premier, puis la scène de jeu (celles qui existent).</summary>
         public static void RegisterScenes()
         {

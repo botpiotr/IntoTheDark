@@ -47,6 +47,17 @@ namespace IntoTheDark.Player
         public bool IsCrouching { get; private set; }
         public bool IsGrounded => controller.isGrounded;
         public Vector3 Velocity => planarVelocity + Vector3.up * verticalVelocity;
+        /// <summary>Figé (choc de stress…) : ne peut ni marcher ni sauter, mais peut regarder autour.</summary>
+        public bool IsFrozen => frozenTimer > 0f;
+
+        private float frozenTimer;
+
+        /// <summary>Fige le joueur sur place pendant cette durée.</summary>
+        public void Freeze(float duration)
+        {
+            frozenTimer = Mathf.Max(frozenTimer, duration);
+            planarVelocity = Vector3.zero;
+        }
 
         private void Awake()
         {
@@ -62,6 +73,7 @@ namespace IntoTheDark.Player
         private void Update()
         {
             float dt = Time.deltaTime;
+            frozenTimer = Mathf.Max(0f, frozenTimer - dt);
 
             UpdateCrouch(dt);
             UpdatePlanarVelocity(dt);
@@ -76,7 +88,7 @@ namespace IntoTheDark.Player
 
         private void UpdatePlanarVelocity(float dt)
         {
-            Vector2 move = input.Move;
+            Vector2 move = IsFrozen ? Vector2.zero : input.Move;
             if (move.sqrMagnitude > 1f)
                 move.Normalize();
 
@@ -89,7 +101,7 @@ namespace IntoTheDark.Player
             Vector3 target = wishDirection * speed;
 
             float response = controller.isGrounded ? acceleration : acceleration * airControl;
-            planarVelocity = Vector3.Lerp(planarVelocity, target, 1f - Mathf.Exp(-response * dt));
+            planarVelocity = IsFrozen ? Vector3.zero : Vector3.Lerp(planarVelocity, target, 1f - Mathf.Exp(-response * dt));
         }
 
         private void UpdateVerticalVelocity(float dt)
@@ -97,7 +109,7 @@ namespace IntoTheDark.Player
             if (controller.isGrounded && verticalVelocity < 0f)
                 verticalVelocity = -2f; // reste collé au sol
 
-            if (input.JumpPressed && controller.isGrounded && !IsCrouching && stamina.TryConsume(jumpCost))
+            if (!IsFrozen && input.JumpPressed && controller.isGrounded && !IsCrouching && stamina.TryConsume(jumpCost))
                 verticalVelocity = Mathf.Sqrt(2f * jumpHeight * -gravity);
 
             verticalVelocity += gravity * dt;

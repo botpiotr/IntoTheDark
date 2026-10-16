@@ -27,6 +27,7 @@ Material:
     m_Floats:
     - _EmissionThroughDarkness: 0
     - _LightClamp: 0.6
+    - _ReceivedLightMax: 1.6
     - _Smoothness: 0.8
     - _SpecularStrength: 0.4
     - _VisibleFromAfar: 0

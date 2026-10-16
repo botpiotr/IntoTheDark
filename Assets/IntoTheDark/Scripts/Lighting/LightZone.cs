@@ -37,6 +37,15 @@ namespace IntoTheDark.Lighting
 
         public bool Contains(Vector3 point) => (point - Center).sqrMagnitude <= radius * radius;
 
+        /// <summary>Première zone active qui couvre ce point (null si aucune).</summary>
+        public static LightZone FindCovering(Vector3 point)
+        {
+            for (int i = 0; i < active.Count; i++)
+                if (active[i].Contains(point))
+                    return active[i];
+            return null;
+        }
+
         /// <summary>Ce point est-il dans au moins une zone éclairée ?</summary>
         public static bool IsLit(Vector3 point)
         {

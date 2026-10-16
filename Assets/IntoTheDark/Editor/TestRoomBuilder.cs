@@ -1,10 +1,12 @@
 using System;
 using System.Linq;
 using IntoTheDark.Aether;
+using IntoTheDark.Creatures;
 using IntoTheDark.Cycle;
 using IntoTheDark.Game;
 using IntoTheDark.Lighting;
 using IntoTheDark.Player;
+using Unity.AI.Navigation;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -42,7 +44,7 @@ namespace IntoTheDark.EditorTools
                     return;
             }
 
-            if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo())
+            if (!ProjectSetup.ConfirmReplaceOpenScenes())
                 return;
 
             var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
@@ -57,6 +59,8 @@ namespace IntoTheDark.EditorTools
             BuildPostProcessing();
             BuildCycle();
             new GameObject("GameSession").AddComponent<GameSession>();
+            BuildNavigation(level);
+            BuildCreatures(player.GetComponent<PlayerHealth>(), palette);
 
             ProjectSetup.EnsureFolder(ScenesFolder);
             EditorSceneManager.SaveScene(scene, ScenePath);
@@ -90,24 +94,22 @@ namespace IntoTheDark.EditorTools
             ProjectSetup.EnsureFolder(MaterialsFolder);
             return new Palette
             {
-                Floor = EnvMat("M_SteelFloor", new Color(0.42f, 0.43f, 0.45f), 0.35f, 0.25f),
-                Wall = EnvMat("M_SteelWall", new Color(0.55f, 0.58f, 0.6f), 0.45f, 0.35f),
-                Ceiling = EnvMat("M_SteelCeiling", new Color(0.32f, 0.33f, 0.35f), 0.25f, 0.15f),
-                Pipe = EnvMat("M_Pipe", new Color(0.55f, 0.45f, 0.35f), 0.55f, 0.45f),
-                Debris = EnvMat("M_Debris", new Color(0.45f, 0.35f, 0.27f), 0.2f, 0.1f),
-                EmergencyStrip = EnvMat("M_EmergencyStrip", Color.black, 0.5f, 0.2f, new Color(0.6f, 0.04f, 0.02f)),
-                AetherGlow = EnvMat("M_AetherGlow", Color.black, 0.8f, 0.2f, new Color(0.1f, 0.55f, 0.7f)),
+                Floor = EnvMat("M_SteelFloor", new Color(0.42f, 0.43f, 0.45f)),
+                Wall = EnvMat("M_SteelWall", new Color(0.55f, 0.58f, 0.6f)),
+                Ceiling = EnvMat("M_SteelCeiling", new Color(0.32f, 0.33f, 0.35f)),
+                Pipe = EnvMat("M_Pipe", new Color(0.55f, 0.45f, 0.35f)),
+                Debris = EnvMat("M_Debris", new Color(0.45f, 0.35f, 0.27f)),
+                EmergencyStrip = EnvMat("M_EmergencyStrip", Color.black, new Color(0.6f, 0.04f, 0.02f)),
+                AetherGlow = EnvMat("M_AetherGlow", Color.black, new Color(0.1f, 0.55f, 0.7f)),
             };
         }
 
         /// <summary>Matériau de décor : shader DarknessLit, noyé dans les ténèbres hors de la lumière.</summary>
-        private static Material EnvMat(string name, Color baseColor, float smoothness, float specular,
+        private static Material EnvMat(string name, Color baseColor,
             Color? emission = null, float emissionThroughDarkness = 0f, float lightClamp = 0f, bool visibleFromAfar = false)
         {
             var mat = LoadOrCreateMaterial(name, "IntoTheDark/DarknessLit");
             mat.SetColor("_BaseColor", baseColor);
-            mat.SetFloat("_Smoothness", smoothness);
-            mat.SetFloat("_SpecularStrength", specular);
             mat.SetColor("_EmissionColor", emission ?? Color.black);
             mat.SetFloat("_EmissionThroughDarkness", emissionThroughDarkness);
             mat.SetFloat("_LightClamp", lightClamp);
@@ -136,14 +138,28 @@ namespace IntoTheDark.EditorTools
             return mat;
         }
 
-        /// <summary>Matériau URP Lit standard (objets tenus en main, non concernés par les ténèbres).</summary>
-        private static Material Mat(string name, Color baseColor, float metallic, float smoothness, Color? emission = null)
+        /// <summary>
+        /// Objets tenus en main (lampe, bâton, poignet) : même shader diffus que le décor, donc sans reflet
+        /// et sans éblouissement près de la lampe. Leur lueur propre reste visible même dans le noir.
+        /// </summary>
+        private static Material ViewMat(string name, Color baseColor, Color? emission = null) =>
+            EnvMat(name, baseColor, emission, emissionThroughDarkness: 1f);
+
+        /// <summary>
+        /// Matériau URP Lit (foyer du phare, yeux : visibles de loin, non concernés par les ténèbres) : purement diffus,
+        /// sans reflet spéculaire ni réflexion de l'environnement.
+        /// </summary>
+        private static Material Mat(string name, Color baseColor, Color? emission = null)
         {
             var mat = LoadOrCreateMaterial(name, "Universal Render Pipeline/Lit");
 
             mat.SetColor("_BaseColor", baseColor);
-            mat.SetFloat("_Metallic", metallic);
-            mat.SetFloat("_Smoothness", smoothness);
+            mat.SetFloat("_Metallic", 0f);
+            mat.SetFloat("_Smoothness", 0f);
+            mat.SetFloat("_SpecularHighlights", 0f);
+            mat.SetFloat("_EnvironmentReflections", 0f);
+            mat.EnableKeyword("_SPECULARHIGHLIGHTS_OFF");
+            mat.EnableKeyword("_ENVIRONMENTREFLECTIONS_OFF");
 
             if (emission.HasValue)
             {
@@ -219,15 +235,15 @@ namespace IntoTheDark.EditorTools
 
         private static void BuildBeacon(Transform parent, Vector3 position, Palette p, AetherDeposit deposit)
         {
-            var coreMat = Mat("M_BeaconCore", new Color(0.3f, 0.75f, 0.9f), 0f, 0.9f, new Color(0.4f, 1.5f, 2f));
+            var coreMat = Mat("M_BeaconCore", new Color(0.3f, 0.75f, 0.9f), new Color(0.4f, 1.5f, 2f));
             var haloMat = LoadOrCreateMaterial("M_BeaconHalo", "IntoTheDark/Glow");
             haloMat.SetColor("_Color", new Color(0.1f, 0.6f, 0.8f, 0.35f));
             haloMat.SetFloat("_Falloff", 3f);
             EditorUtility.SetDirty(haloMat);
 
             // Pièces du phare : la lumière qu'elles reçoivent est plafonnée (elles sont collées à la source).
-            var beaconMetal = EnvMat("M_BeaconMetal", new Color(0.35f, 0.38f, 0.4f), 0.5f, 0.3f, lightClamp: 0.6f);
-            var beaconCage = EnvMat("M_BeaconCage", new Color(0.25f, 0.27f, 0.3f), 0.4f, 0.3f, lightClamp: 0.45f);
+            var beaconMetal = EnvMat("M_BeaconMetal", new Color(0.35f, 0.38f, 0.4f), lightClamp: 0.6f);
+            var beaconCage = EnvMat("M_BeaconCage", new Color(0.25f, 0.27f, 0.3f), lightClamp: 0.45f);
 
             var root = Group("Beacon", parent);
             root.localPosition = position;
@@ -272,7 +288,7 @@ namespace IntoTheDark.EditorTools
             zone.EdgeColor = new Color(0.3f, 0.85f, 1f);
 
             // Jauge de réserve sur le fût, côté point de départ : tube d'éther gradué (25/50/75 %).
-            var gaugeMat = EnvMat("M_BeaconAether", new Color(0.1f, 0.35f, 0.45f), 0.8f, 0.4f,
+            var gaugeMat = EnvMat("M_BeaconAether", new Color(0.1f, 0.35f, 0.45f),
                 emission: new Color(0.2f, 1f, 1.4f), lightClamp: 0.6f);
             const float gaugeBottom = 0.3f, gaugeHeight = 1f, gaugeZ = -0.29f;
             Decor("GaugePlate", root, new Vector3(0f, gaugeBottom + gaugeHeight / 2f, -0.262f),
@@ -382,6 +398,7 @@ namespace IntoTheDark.EditorTools
             cameraData.cameraStack.Add(overlay);
 
             BuildLantern(cameraGo.transform, viewModelLayer);
+            BuildArm(cameraGo.transform, viewModelLayer);
 
             var controller = player.AddComponent<CharacterController>();
             controller.height = 1.8f;
@@ -397,6 +414,9 @@ namespace IntoTheDark.EditorTools
 
             player.AddComponent<PlayerLightState>();
             player.AddComponent<PlayerHealth>();
+            player.AddComponent<PlayerStress>();
+            player.AddComponent<StressEffects>();
+            player.AddComponent<IntoTheDark.UI.ScreenFeedback>();
 
             var interactor = new SerializedObject(player.AddComponent<PlayerInteractor>());
             interactor.FindProperty("cameraRoot").objectReferenceValue = cameraRoot;
@@ -412,11 +432,11 @@ namespace IntoTheDark.EditorTools
 
         private static void BuildLantern(Transform cameraTransform, int layer)
         {
-            var paint = Mat("M_LanternPaint", new Color(0.4f, 0.1f, 0.07f), 0.3f, 0.5f);
-            var brass = Mat("M_LanternBrass", new Color(0.65f, 0.48f, 0.22f), 0.5f, 0.6f);
-            var glass = Mat("M_LanternGlass", new Color(0.9f, 0.72f, 0.45f), 0f, 0.9f, new Color(2.4f, 1.3f, 0.45f));
+            var paint = ViewMat("M_LanternPaint", new Color(0.4f, 0.1f, 0.07f));
+            var brass = ViewMat("M_LanternBrass", new Color(0.65f, 0.48f, 0.22f));
+            var glass = ViewMat("M_LanternGlass", new Color(0.9f, 0.72f, 0.45f), new Color(2.4f, 1.3f, 0.45f));
 
-            var wood = Mat("M_PoleWood", new Color(0.32f, 0.22f, 0.14f), 0f, 0.25f);
+            var wood = ViewMat("M_PoleWood", new Color(0.32f, 0.22f, 0.14f));
 
             // Ensemble porté sur le dos : bâton qui passe au-dessus de l'épaule gauche,
             // lampe suspendue à son extrémité. C'est ce "LanternRig" qui balancera plus tard.
@@ -471,7 +491,7 @@ namespace IntoTheDark.EditorTools
             zone.EdgeColor = new Color(1f, 0.72f, 0.4f);
 
             // Jauge diégétique : tube d'éther sur le flanc tourné vers le joueur.
-            var aether = Mat("M_LanternAether", new Color(0.2f, 0.8f, 1f), 0f, 0.9f, new Color(0.3f, 1.6f, 2.2f));
+            var aether = ViewMat("M_LanternAether", new Color(0.2f, 0.8f, 1f), new Color(0.3f, 1.6f, 2.2f));
             Vector3 toCamera = Quaternion.Inverse(root.localRotation) * -root.localPosition;
             toCamera.y = 0f;
             toCamera.Normalize();
@@ -505,6 +525,85 @@ namespace IntoTheDark.EditorTools
             serialized.ApplyModifiedPropertiesWithoutUndo();
         }
 
+        // ---------- Poignet gauche : montre de vie et de stress ----------
+
+        private static void BuildArm(Transform cameraTransform, int layer)
+        {
+            var sleeve = ViewMat("M_ArmSleeve", new Color(0.16f, 0.17f, 0.18f));
+            var strap = ViewMat("M_WatchStrap", new Color(0.12f, 0.09f, 0.06f));
+            var casing = ViewMat("M_WatchCase", new Color(0.35f, 0.3f, 0.24f));
+            // Partie vide des tubes : noire. Liquides émissifs, visibles dans le noir.
+            var healthTube = ViewMat("M_ArmHealthTube", Color.black);
+            var stressTube = ViewMat("M_ArmStressTube", Color.black);
+            // Lueur modérée : assez pour se voir dans le noir, sans halo qui déborde sur le tube vide.
+            var healthMat = ViewMat("M_ArmHealth", new Color(0.8f, 0.05f, 0.04f), new Color(1.3f, 0.08f, 0.05f));
+            var stressMat = ViewMat("M_ArmStress", new Color(0.55f, 0.25f, 0.9f), new Color(0.7f, 0.3f, 1.3f));
+
+            // Avant-bras presque hors champ : seul le poignet dépasse en bas à gauche de la vue.
+            var elbow = new Vector3(-0.45f, -0.36f, 0.2f);
+            var wrist = new Vector3(-0.19f, -0.235f, 0.4f);
+            Vector3 along = wrist - elbow;
+            float length = along.magnitude;
+
+            var arm = new GameObject("LeftArm").transform;
+            arm.SetParent(cameraTransform, false);
+            arm.gameObject.layer = layer;
+            arm.localPosition = elbow;
+            arm.localRotation = Quaternion.LookRotation(along, -wrist); // dessus du poignet tourné vers la caméra
+
+            var alongZ = Quaternion.Euler(90f, 0f, 0f); // les cylindres Unity sont orientés sur Y
+            var forearm = Part("Forearm", arm, PrimitiveType.Cylinder, new Vector3(0f, 0f, length * 0.5f),
+                new Vector3(0.07f, length * 0.5f, 0.07f), sleeve, layer);
+            forearm.transform.localRotation = alongZ;
+
+            // Montre : bracelet autour du poignet, boîtier sur le dessus, deux petits tubes en travers du bras.
+            float watchZ = length - 0.035f;
+            const float top = 0.035f;
+            var band = Part("WatchStrap", arm, PrimitiveType.Cylinder, new Vector3(0f, 0f, watchZ),
+                new Vector3(0.074f, 0.012f, 0.074f), strap, layer);
+            band.transform.localRotation = alongZ;
+            Part("WatchCase", arm, PrimitiveType.Cube, new Vector3(0f, top, watchZ),
+                new Vector3(0.042f, 0.008f, 0.032f), casing, layer);
+
+            const float gaugeLength = 0.03f;
+            var healthFluid = GaugeTube("Health", arm, top + 0.006f, watchZ + 0.007f, gaugeLength,
+                healthTube, healthMat, layer, fillFromRight: true, out var healthRenderer);
+            var stressFluid = GaugeTube("Stress", arm, top + 0.006f, watchZ - 0.007f, gaugeLength,
+                stressTube, stressMat, layer, fillFromRight: true, out var stressRenderer);
+
+            var gauges = new SerializedObject(arm.gameObject.AddComponent<WristGauges>());
+            gauges.FindProperty("shakeRoot").objectReferenceValue = arm;
+            gauges.FindProperty("healthFluid").objectReferenceValue = healthFluid;
+            gauges.FindProperty("healthRenderer").objectReferenceValue = healthRenderer;
+            gauges.FindProperty("stressFluid").objectReferenceValue = stressFluid;
+            gauges.FindProperty("stressRenderer").objectReferenceValue = stressRenderer;
+            gauges.ApplyModifiedPropertiesWithoutUndo();
+        }
+
+        /// <summary>
+        /// Petit tube noir en travers du poignet (axe X), avec un liquide lumineux dont le pivot,
+        /// à une extrémité (gauche, ou droite si fillFromRight), s'étire en X.
+        /// </summary>
+        private static Transform GaugeTube(string name, Transform arm, float y, float z, float length,
+            Material tubeMat, Material fluidMat, int layer, bool fillFromRight, out Renderer fluidRenderer)
+        {
+            float side = fillFromRight ? -1f : 1f; // le liquide part de cette extrémité
+            var alongX = Quaternion.Euler(0f, 0f, 90f);
+            var tube = Part(name + "Tube", arm, PrimitiveType.Cylinder, new Vector3(0f, y, z),
+                new Vector3(0.008f, length * 0.5f, 0.008f), tubeMat, layer);
+            tube.transform.localRotation = alongX;
+
+            var pivot = new GameObject(name + "Fluid").transform;
+            pivot.SetParent(arm, false);
+            pivot.gameObject.layer = layer;
+            pivot.localPosition = new Vector3(-side * length * 0.5f, y + 0.001f, z);
+            var fluid = Part("Fluid", pivot, PrimitiveType.Cylinder, new Vector3(side * length * 0.5f, 0f, 0f),
+                new Vector3(0.0095f, length * 0.5f, 0.0095f), fluidMat, layer); // gaine le tube : il ne cache pas le liquide
+            fluid.transform.localRotation = alongX;
+            fluidRenderer = fluid.GetComponent<Renderer>();
+            return pivot;
+        }
+
         /// <summary>Pièce de modèle tenu en main : sans collision ni ombre, sur le calque ViewModel.</summary>
         private static GameObject Part(string name, Transform parent, PrimitiveType shape, Vector3 position, Vector3 scale,
             Material mat, int layer)
@@ -534,6 +633,84 @@ namespace IntoTheDark.EditorTools
             return go;
         }
 
+        // ---------- Créatures ----------
+
+        private const string PrefabsFolder = "Assets/IntoTheDark/Prefabs";
+        private const string LurkerPrefabPath = PrefabsFolder + "/Lurker.prefab";
+
+        /// <summary>Maillage de navigation calculé au lancement à partir des collisions du décor.</summary>
+        private static void BuildNavigation(Transform level)
+        {
+            var surface = level.gameObject.AddComponent<NavMeshSurface>();
+            surface.collectObjects = CollectObjects.Children;
+            surface.useGeometry = UnityEngine.AI.NavMeshCollectGeometry.PhysicsColliders;
+            level.gameObject.AddComponent<NavMeshBaker>();
+        }
+
+        private static void BuildCreatures(PlayerHealth player, Palette p)
+        {
+            var prefab = BuildLurkerPrefab();
+
+            var go = new GameObject("Creatures");
+            var director = go.AddComponent<CreatureDirector>();
+            var serialized = new SerializedObject(director);
+            serialized.FindProperty("lurkerPrefab").objectReferenceValue = prefab;
+            serialized.FindProperty("player").objectReferenceValue = player;
+            // Toute la carte : grande salle, couloir et petite pièce.
+            serialized.FindProperty("spawnArea").boundsValue = new Bounds(
+                new Vector3(0f, 1f, (RoomStart + RoomDepth - HallHalfZ) / 2f),
+                new Vector3(HallHalfX * 2f, 2f, RoomStart + RoomDepth + HallHalfZ));
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+        }
+
+        /// <summary>
+        /// Rôdeur mutant en formes simples : silhouette voûtée sombre (visible seulement dans la lumière)
+        /// et yeux rouges émissifs (toujours visibles).
+        /// </summary>
+        private static Lurker BuildLurkerPrefab()
+        {
+            var skin = EnvMat("M_LurkerSkin", new Color(0.14f, 0.11f, 0.12f));
+            var eyes = Mat("M_LurkerEyes", new Color(0.3f, 0f, 0f), new Color(4f, 0.25f, 0.12f));
+
+            var root = new GameObject("Lurker");
+            var body = Group("Body", root.transform);
+
+            Decor("Torso", body, new Vector3(0f, 1f, 0.05f), new Vector3(0.62f, 0.5f, 0.5f), skin, PrimitiveType.Capsule)
+                .transform.localRotation = Quaternion.Euler(28f, 0f, 0f);
+            Decor("Head", body, new Vector3(0f, 1.42f, 0.32f), new Vector3(0.36f, 0.32f, 0.4f), skin, PrimitiveType.Sphere);
+            foreach (float side in new[] { -1f, 1f })
+            {
+                Decor("Arm", body, new Vector3(0.36f * side, 0.82f, 0.28f), new Vector3(0.14f, 0.5f, 0.14f), skin, PrimitiveType.Capsule)
+                    .transform.localRotation = Quaternion.Euler(30f, 0f, 8f * side);
+                Decor("Leg", body, new Vector3(0.17f * side, 0.36f, -0.05f), new Vector3(0.18f, 0.36f, 0.18f), skin, PrimitiveType.Capsule);
+                var eye = Decor("Eye", body, new Vector3(0.08f * side, 1.46f, 0.5f), Vector3.one * 0.065f, eyes, PrimitiveType.Sphere);
+                eye.GetComponent<Renderer>().shadowCastingMode = ShadowCastingMode.Off;
+            }
+
+            var collider = root.AddComponent<CapsuleCollider>();
+            collider.center = new Vector3(0f, 0.85f, 0f);
+            collider.height = 1.7f;
+            collider.radius = 0.4f;
+
+            var agent = root.AddComponent<UnityEngine.AI.NavMeshAgent>();
+            agent.radius = 0.4f;
+            agent.height = 1.7f;
+            agent.speed = 2f;
+            agent.angularSpeed = 720f;      // réactif : se retourne vite
+            agent.acceleration = 40f;
+            agent.stoppingDistance = 0.6f;
+            agent.autoBraking = false;
+
+            root.AddComponent<Lurker>();
+            root.AddComponent<AudioSource>();
+            root.AddComponent<CreatureVoice>();
+
+            ProjectSetup.EnsureFolder(PrefabsFolder);
+            var prefab = PrefabUtility.SaveAsPrefabAsset(root, LurkerPrefabPath);
+            UnityEngine.Object.DestroyImmediate(root);
+            return prefab.GetComponent<Lurker>();
+        }
+
         // ---------- Cycle ----------
 
         private static void BuildCycle()
@@ -555,17 +732,21 @@ namespace IntoTheDark.EditorTools
                 ProjectSetup.EnsureFolder(ProjectSetup.SettingsFolder);
                 profile = ScriptableObject.CreateInstance<VolumeProfile>();
                 AssetDatabase.CreateAsset(profile, path);
-                AddOverride<Bloom>(profile, b =>
-                {
-                    b.intensity.Override(0.7f);
-                    b.threshold.Override(1.1f);
-                    b.scatter.Override(0.6f);
-                });
+                AddOverride<Bloom>(profile, b => { });
                 AddOverride<Vignette>(profile, v =>
                 {
                     v.intensity.Override(0.4f);
                     v.smoothness.Override(0.5f);
                 });
+            }
+
+            // Halo discret : seules les sources très lumineuses (foyers, flammes) débordent, pas les surfaces.
+            if (profile.TryGet<Bloom>(out var bloom))
+            {
+                bloom.intensity.Override(0.35f);
+                bloom.threshold.Override(1.6f);
+                bloom.scatter.Override(0.5f);
+                EditorUtility.SetDirty(profile);
             }
 
             // Compression des hautes lumières : les zones très éclairées gardent leurs détails.

@@ -15,7 +15,7 @@ namespace IntoTheDark.EditorTools
         [MenuItem("Into the Dark/3. Construire le menu principal", priority = 3)]
         public static void Build()
         {
-            if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo())
+            if (!ProjectSetup.ConfirmReplaceOpenScenes())
                 return;
 
             var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);

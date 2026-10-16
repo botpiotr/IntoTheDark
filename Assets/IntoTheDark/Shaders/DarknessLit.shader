@@ -1,5 +1,5 @@
 // Shader des décors d'Into the Dark.
-// Éclairage simple (diffus + spéculaire) par toutes les lumières temps réel, puis ténèbres :
+// Éclairage purement diffus (sans reflet) par toutes les lumières temps réel, puis ténèbres :
 // tout ce qui est hors des zones de lumière (LightZone) est noyé dans un brouillard noir opaque,
 // avec un fondu au bord. Réglages globaux : composant DarknessSettings dans la scène.
 Shader "IntoTheDark/DarknessLit"
@@ -7,11 +7,10 @@ Shader "IntoTheDark/DarknessLit"
     Properties
     {
         _BaseColor ("Couleur", Color) = (0.5, 0.5, 0.5, 1)
-        _Smoothness ("Brillance", Range(0, 1)) = 0.35
-        _SpecularStrength ("Intensité spéculaire", Range(0, 1)) = 0.3
         [HDR] _EmissionColor ("Émission", Color) = (0, 0, 0, 1)
         _EmissionThroughDarkness ("Émission visible dans le noir", Range(0, 1)) = 0
         _LightClamp ("Plafond de lumière reçue (0 = aucun)", Range(0, 4)) = 0
+        _ReceivedLightMax ("Lumière reçue max par source (anti-éblouissement)", Range(0.1, 8)) = 1.6
         [Toggle] _VisibleFromAfar ("Visible de loin quand éclairé (ex. le phare lui-même)", Float) = 0
     }
 
@@ -40,11 +39,10 @@ Shader "IntoTheDark/DarknessLit"
 
             CBUFFER_START(UnityPerMaterial)
                 half4 _BaseColor;
-                half _Smoothness;
-                half _SpecularStrength;
                 half4 _EmissionColor;
                 half _EmissionThroughDarkness;
                 half _LightClamp;
+                half _ReceivedLightMax;
                 half _VisibleFromAfar;
             CBUFFER_END
 
@@ -158,31 +156,32 @@ Shader "IntoTheDark/DarknessLit"
                 edgeGlow *= _DarknessParams.w;
             }
 
-            void AddLight(Light light, float3 normalWS, float3 viewDirWS, half3 albedo, half shininess, inout half3 color)
+            // Lambert : la surface absorbe et diffuse la lumière, sans aucun reflet.
+            // La lumière reçue de chaque source est compressée en douceur : près d'une lampe ou du phare,
+            // les surfaces restent lisibles au lieu de devenir blanches et aveuglantes.
+            void AddLight(Light light, float3 normalWS, half3 albedo, inout half3 color)
             {
                 half3 radiance = light.color * (light.distanceAttenuation * light.shadowAttenuation);
+                half limit = max(_ReceivedLightMax, 0.1);
+                radiance = limit * (1.0 - exp(-radiance / limit));
                 half nDotL = saturate(dot(normalWS, light.direction));
-                float3 halfDir = SafeNormalize(light.direction + viewDirWS);
-                half specular = pow(saturate(dot(normalWS, halfDir)), shininess) * _SpecularStrength * nDotL;
-                color += radiance * (albedo * nDotL + specular);
+                color += radiance * albedo * nDotL;
             }
 
             half4 Frag(Varyings input) : SV_Target
             {
                 float3 normalWS = normalize(input.normalWS);
-                float3 viewDirWS = GetWorldSpaceNormalizeViewDir(input.positionWS);
                 half3 albedo = _BaseColor.rgb;
-                half shininess = exp2(10.0 * _Smoothness + 1.0);
 
                 half3 color = 0;
                 Light mainLight = GetMainLight(TransformWorldToShadowCoord(input.positionWS));
-                AddLight(mainLight, normalWS, viewDirWS, albedo, shininess, color);
+                AddLight(mainLight, normalWS, albedo, color);
 
                 uint lightCount = GetAdditionalLightsCount();
                 for (uint lightIndex = 0u; lightIndex < lightCount; ++lightIndex)
                 {
                     Light light = GetAdditionalLight(lightIndex, input.positionWS, half4(1, 1, 1, 1));
-                    AddLight(light, normalWS, viewDirWS, albedo, shininess, color);
+                    AddLight(light, normalWS, albedo, color);
                 }
 
                 // Plafond progressif : évite qu'un objet collé à une lumière ne devienne blanc.

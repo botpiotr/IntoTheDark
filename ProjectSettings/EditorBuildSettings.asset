@@ -6,6 +6,9 @@ EditorBuildSettings:
   serializedVersion: 2
   m_Scenes:
   - enabled: 1
+    path: Assets/IntoTheDark/Scenes/MainMenu.unity
+    guid: b52d8d3256a837d47b71329f1095c065
+  - enabled: 1
     path: Assets/IntoTheDark/Scenes/TestRoom.unity
     guid: 4ac7c09b41813a74792fbc80ee426dc1
   m_configObjects: {}
