@@ -22,6 +22,10 @@ namespace IntoTheDark.Core
         public InputAction Interact { get; }
         public InputAction Pause { get; }
         public InputAction ToggleLamp { get; }
+        public InputAction Attack { get; }
+        /// <summary>Molette : y > 0 vers le haut.</summary>
+        public InputAction WeaponScroll { get; }
+        public InputAction NextWeapon { get; }
 
         public GameInput()
         {
@@ -44,6 +48,9 @@ namespace IntoTheDark.Core
             Interact = Button("Interact", "<Keyboard>/e", "<Gamepad>/buttonNorth");
             Pause = Button("Pause", "<Keyboard>/escape", "<Gamepad>/start");
             ToggleLamp = Button("ToggleLamp", "<Keyboard>/l", "<Gamepad>/dpad/up");
+            Attack = Button("Attack", "<Mouse>/leftButton", "<Gamepad>/rightTrigger");
+            WeaponScroll = Gameplay.AddAction("WeaponScroll", InputActionType.Value, "<Mouse>/scroll", expectedControlLayout: "Vector2");
+            NextWeapon = Button("NextWeapon", "<Gamepad>/rightShoulder");
         }
 
         private InputAction Button(string name, params string[] bindings)

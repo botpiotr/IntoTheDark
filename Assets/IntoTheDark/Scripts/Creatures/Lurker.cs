@@ -1,4 +1,5 @@
 using System;
+using IntoTheDark.Core;
 using IntoTheDark.Cycle;
 using IntoTheDark.Lighting;
 using IntoTheDark.Player;
@@ -16,6 +17,9 @@ namespace IntoTheDark.Creatures
     ///   est dans le noir, il fonce et frappe.
     /// - Fuite (vie ≤ 50 %) : s'enfuit ; repasse en errance après 5 s à plus de 10 m du joueur.
     /// - Panique (vie ≤ 50 %, fuite bloquée) : attaque le joueur, même éclairé, puis fuit ailleurs.
+    /// - Vengeance (touché par une arme) : fonce sur le joueur et frappe une fois, même éclairé, puis fuit.
+    ///
+    /// Esquive : en assaut et en vengeance, pas de côté aléatoire de 1 m, au plus une fois par seconde.
     ///
     /// Assaut (créature de tempête, ou toutes pendant l'apocalypse) : fonce sur le joueur, ou sur un
     /// phare allumé nettement plus proche, et frappe même dans la lumière (lampe ou phare), jusqu'à la mort.
@@ -28,12 +32,12 @@ namespace IntoTheDark.Creatures
     /// Chaque coup reçu : flash blanc et petit bond en l'air et en arrière.
     /// </summary>
     [RequireComponent(typeof(NavMeshAgent))]
-    public class Lurker : MonoBehaviour
+    public class Lurker : MonoBehaviour, IDamageable, IKnockbackable
     {
-        public enum State { Wander, Stalk, Flee, Panic, Assault, Dying }
+        public enum State { Wander, Stalk, Flee, Panic, Assault, Revenge, Dying }
 
         [Header("Vie")]
-        [SerializeField, Min(1f)] private float maxHealth = 100f;
+        [SerializeField, Min(1f)] private float maxHealth = 20f;
         [SerializeField, Range(0f, 1f), Tooltip("Part de la vie max perdue à chaque coup de la lumière d'un phare (un coup par intervalle)")]
         private float beaconDamageFraction = 0.7f;
         [SerializeField, Range(0f, 1f), Tooltip("Part de la vie perdue à chaque seconde passée dans la lumière de la lampe")]
@@ -41,7 +45,7 @@ namespace IntoTheDark.Creatures
         [SerializeField, Min(0.1f), Tooltip("Dans la lumière, au plus un coup par intervalle (s)")]
         private float lightHitInterval = 1f;
         [SerializeField, Min(0f), Tooltip("Vie récupérée par seconde en errance, dans le noir")]
-        private float wanderRegenPerSecond = 15f;
+        private float wanderRegenPerSecond = 3f;
         [SerializeField, Range(0f, 1f), Tooltip("En dessous (ou égal) : fuite")] private float fleeThreshold = 0.5f;
 
         [Header("Vitesses (m/s) — le sprint du joueur est à 6")]
@@ -74,6 +78,14 @@ namespace IntoTheDark.Creatures
         [SerializeField] private float attackDamage = 5f;
         [SerializeField, Min(1f), Tooltip("Au plus un coup par seconde et par monstre")] private float attackCooldown = 1f;
         [SerializeField, Tooltip("Durée max de la charge de panique avant d'abandonner")] private float panicTimeout = 3f;
+        [SerializeField, Tooltip("Touché par une arme : durée max de la vengeance avant de fuir")] private float revengeTimeout = 3f;
+
+        [Header("Esquive (assaut et vengeance)")]
+        [SerializeField, Tooltip("Distance du pas de côté (m)")] private float dashDistance = 1f;
+        [SerializeField, Min(0.05f)] private float dashDuration = 0.12f;
+        [SerializeField, Min(0f), Tooltip("Au plus une esquive par intervalle (s)")] private float dashCooldown = 1f;
+        [SerializeField, Min(0f), Tooltip("Probabilité d'esquiver par seconde, une fois l'esquive disponible")] private float dashChancePerSecond = 1.2f;
+        [SerializeField, Tooltip("N'esquive qu'à cette distance du joueur ou moins (m)")] private float dashRange = 8f;
 
         [Header("Apparence")]
         [SerializeField] private float deathDuration = 0.5f;
@@ -83,6 +95,8 @@ namespace IntoTheDark.Creatures
         [SerializeField] private float hitHopHeight = 0.35f;
         [SerializeField, Tooltip("Recul en mètres")] private float hitKnockback = 0.8f;
         [SerializeField, Min(0.05f)] private float hitHopDuration = 0.3f;
+        [SerializeField, Min(0.05f), Tooltip("Durée d'un recul infligé par une arme (le rôdeur est sonné pendant ce temps)")]
+        private float knockbackDuration = 0.2f;
 
         [Header("État (lecture seule)")]
         [SerializeField] private State state = State.Wander;
@@ -112,6 +126,11 @@ namespace IntoTheDark.Creatures
         private float hopTimer;
         private Vector3 knockDirection;
         private Vector3 bodyBasePosition;
+        private Vector3 knockbackPush;
+        private float knockbackTimer;
+        private float slideDuration = 0.2f;
+        private float revengeTimer;
+        private float dashTimer;
         private Renderer[] bodyRenderers;
         private Color[] baseEmissions;
         private MaterialPropertyBlock propertyBlock;
@@ -182,6 +201,10 @@ namespace IntoTheDark.Creatures
             if (state == State.Dying) return;
 
             attackTimer -= dt;
+            dashTimer -= dt;
+            if (UpdateKnockback(dt)) return; // repoussé ou en pleine esquive : pas d'autre action
+            if (state == State.Assault || state == State.Revenge) TryDash(dt);
+
             repathTimer -= dt;
 
             var cycle = CycleManager.Instance;
@@ -216,7 +239,7 @@ namespace IntoTheDark.Creatures
                 if (beaconHitTimer >= lightHitInterval)
                 {
                     beaconHitTimer -= lightHitInterval;
-                    TakeDamage(maxHealth * beaconDamageFraction, beacon.Zone.Center);
+                    Hurt(maxHealth * beaconDamageFraction, beacon.Zone.Center);
                 }
                 return;
             }
@@ -233,15 +256,97 @@ namespace IntoTheDark.Creatures
             if (lightHitTimer >= lightHitInterval)
             {
                 lightHitTimer -= lightHitInterval;
-                TakeDamage(maxHealth * lanternDamagePerSecond * lightHitInterval, zone.Center);
+                Hurt(maxHealth * lanternDamagePerSecond * lightHitInterval, zone.Center);
             }
+        }
+
+        /// <summary>Repoussé par une arme : glisse sur le maillage de navigation, sans pouvoir agir.</summary>
+        public void Knockback(Vector3 push)
+        {
+            if (state == State.Dying) return;
+            push.y = 0f;
+            StartSlide(push, knockbackDuration);
+        }
+
+        private void StartSlide(Vector3 push, float duration)
+        {
+            knockbackPush = push;
+            slideDuration = duration;
+            knockbackTimer = duration;
+        }
+
+        /// <summary>
+        /// Esquive : de temps en temps, un pas de côté rapide par rapport au joueur (au plus une fois par seconde).
+        /// Jamais dans un mur, et hors assaut jamais dans la lumière d'un phare.
+        /// </summary>
+        private void TryDash(float dt)
+        {
+            if (dashTimer > 0f || !HasLivingPlayer() || !agent.isOnNavMesh) return;
+            Vector3 toPlayer = player.transform.position - transform.position;
+            toPlayer.y = 0f;
+            if (toPlayer.sqrMagnitude > dashRange * dashRange || toPlayer.sqrMagnitude < 0.01f) return;
+            if (UnityEngine.Random.value > dashChancePerSecond * dt) return;
+
+            Vector3 side = Vector3.Cross(Vector3.up, toPlayer.normalized);
+            if (UnityEngine.Random.value < 0.5f) side = -side;
+            for (int attempt = 0; attempt < 2; attempt++, side = -side)
+            {
+                Vector3 target = transform.position + side * dashDistance;
+                if (NavMesh.Raycast(transform.position, target, out _, NavMesh.AllAreas)) continue; // mur
+                if (state != State.Assault && Beacon.AnyLitBeaconCovers(target + Vector3.up)) continue;
+                StartSlide(side * dashDistance, dashDuration);
+                dashTimer = dashCooldown;
+                return;
+            }
+        }
+
+        /// <returns>true tant que le recul est en cours.</returns>
+        private bool UpdateKnockback(float dt)
+        {
+            if (knockbackTimer <= 0f) return false;
+            float before = knockbackTimer;
+            knockbackTimer -= dt;
+            if (agent.enabled && agent.isOnNavMesh)
+            {
+                agent.isStopped = true;
+                agent.velocity = Vector3.zero;
+                // Décéléré : part vite, ralentit en fin de recul (somme = la distance demandée).
+                float t0 = 1f - before / slideDuration;
+                float t1 = 1f - Mathf.Max(0f, knockbackTimer) / slideDuration;
+                float travelled = (1f - (1f - t1) * (1f - t1)) - (1f - (1f - t0) * (1f - t0));
+                agent.Move(knockbackPush * travelled);
+                if (knockbackTimer <= 0f) agent.isStopped = false;
+            }
+            return knockbackTimer > 0f;
         }
 
         /// <summary>Coup reçu, venant de derrière la créature (source inconnue).</summary>
         public void TakeDamage(float amount) => TakeDamage(amount, transform.position + transform.forward);
 
-        /// <summary>Coup reçu depuis une source : flash blanc, petit bond à l'opposé de la source.</summary>
+        /// <summary>
+        /// Coup d'arme : dégâts, puis il se venge (fonce sur le joueur et frappe, même dans la lumière),
+        /// avant de fuir. À l'assaut, il continue simplement l'assaut.
+        /// </summary>
         public void TakeDamage(float amount, Vector3 source)
+        {
+            if (state == State.Dying || amount <= 0f) return;
+            Hurt(amount, source);
+            if (state == State.Dying || InAssaultMode) return;
+            SetState(State.Revenge);
+            revengeTimer = revengeTimeout;
+        }
+
+        private bool InAssaultMode
+        {
+            get
+            {
+                var cycle = CycleManager.Instance;
+                return ForcedAssault || (cycle != null && cycle.Phase == CyclePhase.Apocalypse);
+            }
+        }
+
+        /// <summary>Perte de vie (arme ou lumière) : flash blanc, petit bond à l'opposé de la source.</summary>
+        private void Hurt(float amount, Vector3 source)
         {
             if (state == State.Dying || amount <= 0f) return;
             health -= amount;
@@ -295,6 +400,10 @@ namespace IntoTheDark.Creatures
             {
                 case State.Panic:
                     UpdatePanic(dt);
+                    return;
+
+                case State.Revenge:
+                    UpdateRevenge(dt);
                     return;
 
                 case State.Flee:
@@ -431,6 +540,21 @@ namespace IntoTheDark.Creatures
                 if (Vector3.Dot(side, lastFleeDirection) > 0.7f * side.magnitude) side = -side;
                 BeginFlee(side);
             }
+        }
+
+        // ---------- Vengeance ----------
+
+        /// <summary>Touché par une arme : il fonce sur le joueur, frappe une fois (même éclairé), puis fuit.</summary>
+        private void UpdateRevenge(float dt)
+        {
+            agent.speed = panicSpeed;
+            agent.updateRotation = true;
+            revengeTimer -= dt;
+
+            if (!HasLivingPlayer()) { SetState(State.Wander); return; }
+            MoveTo(player.transform.position);
+            if (TryAttack(1f, ignoreLight: true) || revengeTimer <= 0f)
+                BeginFlee(Vector3.zero);
         }
 
         // ---------- Assaut ----------

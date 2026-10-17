@@ -1,9 +1,11 @@
 using System;
 using System.Linq;
 using IntoTheDark.Aether;
+using IntoTheDark.Combat;
 using IntoTheDark.Creatures;
 using IntoTheDark.Cycle;
 using IntoTheDark.Game;
+using IntoTheDark.Items;
 using IntoTheDark.Lighting;
 using IntoTheDark.Player;
 using Unity.AI.Navigation;
@@ -61,6 +63,7 @@ namespace IntoTheDark.EditorTools
             new GameObject("GameSession").AddComponent<GameSession>();
             BuildNavigation(level);
             BuildCreatures(player.GetComponent<PlayerHealth>(), palette);
+            BuildTrainingDummy(new Vector3(2.6f, 0f, 1.2f), player.transform.position);
 
             ProjectSetup.EnsureFolder(ScenesFolder);
             EditorSceneManager.SaveScene(scene, ScenePath);
@@ -423,6 +426,9 @@ namespace IntoTheDark.EditorTools
             interactor.FindProperty("interactionMask").intValue = ~(1 << viewModelLayer);
             interactor.ApplyModifiedPropertiesWithoutUndo();
 
+            BuildWeapons(player, cameraGo.transform, viewModelLayer);
+            player.AddComponent<IntoTheDark.UI.Reticle>();
+
             return player;
         }
 
@@ -709,6 +715,185 @@ namespace IntoTheDark.EditorTools
             var prefab = PrefabUtility.SaveAsPrefabAsset(root, LurkerPrefabPath);
             UnityEngine.Object.DestroyImmediate(root);
             return prefab.GetComponent<Lurker>();
+        }
+
+        // ---------- Armes et inventaire ----------
+
+        private const string ItemsFolder = "Assets/IntoTheDark/Data/Items";
+        private const string BoltPrefabPath = PrefabsFolder + "/Bolt.prefab";
+
+        private static void BuildWeapons(GameObject player, Transform cameraTransform, int layer)
+        {
+            var boltItem = LoadOrCreateItem("Bolt", "Carreau d'arbalète", 10);
+
+            // Inventaire : une pile de 10 carreaux au départ.
+            var inventory = new SerializedObject(player.AddComponent<Inventory>());
+            var starting = inventory.FindProperty("startingItems");
+            starting.arraySize = 1;
+            starting.GetArrayElementAtIndex(0).FindPropertyRelative("item").objectReferenceValue = boltItem;
+            starting.GetArrayElementAtIndex(0).FindPropertyRelative("count").intValue = 10;
+            inventory.ApplyModifiedPropertiesWithoutUndo();
+
+            var bar = BuildIronBar(cameraTransform, layer);
+            var crossbow = BuildCrossbow(cameraTransform, layer, boltItem, BuildBoltPrefab());
+
+            var holder = new SerializedObject(player.AddComponent<WeaponHolder>());
+            holder.FindProperty("aim").objectReferenceValue = cameraTransform;
+            var weapons = holder.FindProperty("weapons");
+            weapons.arraySize = 2;
+            weapons.GetArrayElementAtIndex(0).objectReferenceValue = bar;
+            weapons.GetArrayElementAtIndex(1).objectReferenceValue = crossbow;
+            holder.ApplyModifiedPropertiesWithoutUndo();
+        }
+
+        private static ItemDefinition LoadOrCreateItem(string fileName, string displayName, int maxStack)
+        {
+            string path = $"{ItemsFolder}/{fileName}.asset";
+            var item = AssetDatabase.LoadAssetAtPath<ItemDefinition>(path);
+            if (item == null)
+            {
+                ProjectSetup.EnsureFolder(ItemsFolder);
+                item = ScriptableObject.CreateInstance<ItemDefinition>();
+                AssetDatabase.CreateAsset(item, path);
+            }
+            item.Setup(displayName, maxStack);
+            EditorUtility.SetDirty(item);
+            return item;
+        }
+
+        /// <summary>
+        /// Barre de fer tenue en main droite. Au repos, la main est sous le bord de l'écran :
+        /// seule la moitié haute de la barre dépasse en bas à droite. Pivot à la main.
+        /// </summary>
+        private static IronBar BuildIronBar(Transform cameraTransform, int layer)
+        {
+            var iron = ViewMat("M_IronBar", new Color(0.3f, 0.3f, 0.32f));
+            var tape = ViewMat("M_IronBarGrip", new Color(0.1f, 0.08f, 0.07f));
+
+            var root = new GameObject("IronBar").transform;
+            root.SetParent(cameraTransform, false);
+            root.gameObject.layer = layer;
+            root.localPosition = new Vector3(0.24f, -0.34f, 0.42f);
+
+            var model = new GameObject("Model").transform;
+            model.SetParent(root, false);
+            model.gameObject.layer = layer;
+
+            Part("Shaft", model, PrimitiveType.Cylinder, new Vector3(0f, 0.24f, 0f), new Vector3(0.022f, 0.26f, 0.022f), iron, layer);
+            Part("Grip", model, PrimitiveType.Cylinder, new Vector3(0f, 0.02f, 0f), new Vector3(0.028f, 0.06f, 0.028f), tape, layer);
+            // Bout recourbé du pied-de-biche
+            Rod("Hook", model, new Vector3(0f, 0.49f, 0f), new Vector3(0f, 0.53f, 0.06f), 0.02f, iron, layer);
+
+            var bar = root.gameObject.AddComponent<IronBar>();
+            SetReference(bar, "model", model);
+            return bar;
+        }
+
+        /// <summary>
+        /// Arbalète compacte, en bas à droite de la vue, à la taille du poignet gauche :
+        /// crosse, arc et corde. Les carreaux ne se voient pas.
+        /// </summary>
+        private static Crossbow BuildCrossbow(Transform cameraTransform, int layer, ItemDefinition boltItem, Bolt boltPrefab)
+        {
+            var wood = ViewMat("M_CrossbowWood", new Color(0.3f, 0.2f, 0.12f));
+            var metal = ViewMat("M_CrossbowMetal", new Color(0.26f, 0.27f, 0.29f));
+            var cord = ViewMat("M_CrossbowString", new Color(0.6f, 0.55f, 0.45f));
+
+            var root = new GameObject("Crossbow").transform;
+            root.SetParent(cameraTransform, false);
+            root.gameObject.layer = layer;
+            root.localPosition = new Vector3(0.16f, -0.2f, 0.4f);   // symétrique du poignet gauche
+
+            var model = new GameObject("Model").transform;
+            model.SetParent(root, false);
+            model.gameObject.layer = layer;
+
+            Part("Stock", model, PrimitiveType.Cube, Vector3.zero, new Vector3(0.022f, 0.026f, 0.13f), wood, layer);
+            Part("Rail", model, PrimitiveType.Cube, new Vector3(0f, 0.015f, 0.02f), new Vector3(0.006f, 0.004f, 0.09f), metal, layer);
+            foreach (float side in new[] { -1f, 1f })
+            {
+                var limb = Part("Limb", model, PrimitiveType.Cube, new Vector3(0.026f * side, 0.016f, 0.06f),
+                    new Vector3(0.052f, 0.007f, 0.01f), metal, layer);
+                limb.transform.localRotation = Quaternion.Euler(0f, 16f * side, 0f);
+            }
+            Part("Cord", model, PrimitiveType.Cube, new Vector3(0f, 0.017f, 0.04f), new Vector3(0.094f, 0.0018f, 0.0018f), cord, layer);
+
+            var muzzle = new GameObject("Muzzle").transform;
+            muzzle.SetParent(model, false);
+            muzzle.localPosition = new Vector3(0f, 0.02f, 0.08f);
+
+            var crossbow = root.gameObject.AddComponent<Crossbow>();
+            var serialized = new SerializedObject(crossbow);
+            serialized.FindProperty("model").objectReferenceValue = model;
+            serialized.FindProperty("boltItem").objectReferenceValue = boltItem;
+            serialized.FindProperty("boltPrefab").objectReferenceValue = boltPrefab;
+            serialized.FindProperty("muzzle").objectReferenceValue = muzzle;
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+            return crossbow;
+        }
+
+        /// <summary>Carreau tiré : pivot à l'arrière, pointe 0,3 m devant ; collider de ramassage (E) une fois planté.</summary>
+        private static Bolt BuildBoltPrefab()
+        {
+            var shaftMat = EnvMat("M_BoltShaft", new Color(0.4f, 0.3f, 0.18f));
+            var tipMat = EnvMat("M_BoltTip", new Color(0.45f, 0.46f, 0.5f));
+            var fletchMat = EnvMat("M_BoltFletching", new Color(0.55f, 0.15f, 0.1f));
+
+            var root = new GameObject("Bolt");
+            var shaft = Decor("Shaft", root.transform, new Vector3(0f, 0f, 0.15f), new Vector3(0.012f, 0.15f, 0.012f),
+                shaftMat, PrimitiveType.Cylinder);
+            shaft.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+            var tip = Decor("Tip", root.transform, new Vector3(0f, 0f, 0.29f), new Vector3(0.02f, 0.02f, 0.04f), tipMat);
+            tip.transform.localRotation = Quaternion.Euler(0f, 0f, 45f);
+            Decor("Fletching", root.transform, new Vector3(0f, 0f, 0.035f), new Vector3(0.002f, 0.035f, 0.05f), fletchMat);
+            Decor("Fletching", root.transform, new Vector3(0f, 0f, 0.035f), new Vector3(0.035f, 0.002f, 0.05f), fletchMat);
+            foreach (var renderer in root.GetComponentsInChildren<Renderer>())
+                renderer.shadowCastingMode = ShadowCastingMode.Off;
+
+            var pickup = root.AddComponent<SphereCollider>();
+            pickup.isTrigger = true;
+            pickup.center = new Vector3(0f, 0f, 0.15f);
+            pickup.radius = 0.2f;
+
+            var bolt = root.AddComponent<Bolt>();
+            SetReference(bolt, "pickupCollider", pickup);
+
+            ProjectSetup.EnsureFolder(PrefabsFolder);
+            var prefab = PrefabUtility.SaveAsPrefabAsset(root, BoltPrefabPath);
+            UnityEngine.Object.DestroyImmediate(root);
+            return prefab.GetComponent<Bolt>();
+        }
+
+        // ---------- Mannequin d'entraînement ----------
+
+        /// <summary>Mannequin de toile sur un poteau, près du phare, tourné vers le joueur.</summary>
+        private static void BuildTrainingDummy(Vector3 position, Vector3 lookAt)
+        {
+            var cloth = EnvMat("M_DummyCloth", new Color(0.45f, 0.37f, 0.24f));
+            var post = EnvMat("M_DummyPost", new Color(0.3f, 0.22f, 0.15f));
+
+            var root = new GameObject("TrainingDummy").transform;
+            root.position = position;
+            Vector3 facing = lookAt - position;
+            facing.y = 0f;
+            if (facing.sqrMagnitude > 0.01f) root.rotation = Quaternion.LookRotation(facing);
+
+            Decor("Base", root, new Vector3(0f, 0.04f, 0f), new Vector3(0.6f, 0.04f, 0.6f), post, PrimitiveType.Cylinder);
+            Decor("Post", root, new Vector3(0f, 0.55f, 0f), new Vector3(0.08f, 0.55f, 0.08f), post, PrimitiveType.Cylinder);
+
+            var body = Group("Body", root);
+            Decor("Torso", body, new Vector3(0f, 1.25f, 0f), new Vector3(0.5f, 0.42f, 0.34f), cloth, PrimitiveType.Capsule);
+            Decor("Head", body, new Vector3(0f, 1.82f, 0f), Vector3.one * 0.3f, cloth, PrimitiveType.Sphere);
+            Decor("Arms", body, new Vector3(0f, 1.45f, 0f), new Vector3(1f, 0.08f, 0.08f), post);
+
+            var collider = root.gameObject.AddComponent<CapsuleCollider>();
+            collider.center = new Vector3(0f, 1.1f, 0f);
+            collider.height = 2.1f;
+            collider.radius = 0.35f;
+
+            var reaction = root.gameObject.AddComponent<HitReaction>();
+            SetReference(reaction, "visual", body);
+            root.gameObject.AddComponent<TrainingDummy>();
         }
 
         // ---------- Cycle ----------

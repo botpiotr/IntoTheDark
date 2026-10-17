@@ -13,7 +13,7 @@ namespace IntoTheDark.Creatures
     /// - une demi-douzaine rôde sur la carte, placée au hasard dans le noir ; elles sont toutes
     ///   attirées pendant l'apocalypse, puis la population est complétée au début du cycle suivant ;
     /// - pendant une tempête, 2 créatures par seconde surgissent du noir et foncent sur le joueur.
-    /// Debug : F7 fait apparaître une créature près du joueur ; F8 blesse de 30 % celles à moins de 10 m.
+    /// Debug : F7 fait apparaître une créature près du joueur ; F8 inflige 5 dégâts (comme une arme) à celles à moins de 10 m.
     /// </summary>
     public class CreatureDirector : MonoBehaviour
     {
@@ -92,7 +92,7 @@ namespace IntoTheDark.Creatures
                 foreach (var list in new[] { mapCreatures, stormCreatures })
                     foreach (var creature in list)
                         if (creature != null && Vector3.Distance(creature.transform.position, player.transform.position) < 10f)
-                            creature.TakeDamage(30f, player.transform.position);
+                            creature.TakeDamage(5f, player.transform.position);
             }
 
             if (keyboard != null && keyboard[debugSpawnKey].wasPressedThisFrame && player != null)

@@ -36,6 +36,19 @@ namespace IntoTheDark.Player
         public bool InteractPressed => Input.Interact.WasPressedThisFrame();
         public bool PausePressed => Input.Pause.WasPressedThisFrame();
         public bool ToggleLampPressed => Input.ToggleLamp.WasPressedThisFrame();
+        public bool AttackPressed => Input.Attack.WasPressedThisFrame();
+        public bool AttackHeld => Input.Attack.IsPressed();
+
+        /// <summary>Changement d'arme demandé cette image : +1 (suivante), -1 (précédente) ou 0.</summary>
+        public int WeaponScroll
+        {
+            get
+            {
+                if (Input.NextWeapon.WasPressedThisFrame()) return 1;
+                float y = Input.WeaponScroll.ReadValue<Vector2>().y;
+                return y > 0.01f ? -1 : y < -0.01f ? 1 : 0; // molette vers le bas : arme suivante
+            }
+        }
 
         private void OnEnable() => Input.Enable();
         private void OnDisable() => input?.Disable();
