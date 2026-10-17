@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using IntoTheDark.Core;
 using IntoTheDark.Cycle;
 using IntoTheDark.Lighting;
@@ -21,8 +22,10 @@ namespace IntoTheDark.Creatures
     ///
     /// Esquive : en assaut et en vengeance, pas de côté aléatoire de 1 m, au plus une fois par seconde.
     ///
-    /// Assaut (créature de tempête, ou toutes pendant l'apocalypse) : fonce sur le joueur, ou sur un
-    /// phare allumé nettement plus proche, et frappe même dans la lumière (lampe ou phare), jusqu'à la mort.
+    /// Assaut de tempête : fonce sur le joueur, ou sur un phare allumé nettement plus proche, et frappe même
+    /// dans la lumière (lampe ou phare), jusqu'à la mort.
+    /// Apocalypse : tous convergent vers le joueur. Dans le noir, ils l'attaquent ; dans la lumière d'un phare,
+    /// ils tournent autour et, de temps en temps, l'un d'eux se jette sur lui à travers la lumière.
     ///
     /// Hors assaut, la lumière des phares est infranchissable : il la contourne, s'arrête à son bord
     /// et, s'il s'y retrouve quand même, en ressort au plus vite.
@@ -54,11 +57,16 @@ namespace IntoTheDark.Creatures
         [SerializeField] private float fleeSpeed = 7.5f;
         [SerializeField] private float panicSpeed = 8f;
         [SerializeField] private float assaultSpeed = 7.5f;
-        [SerializeField, Tooltip("Multiplicateur de vitesse et de dégâts dans le noir pendant l'apocalypse")]
+        [SerializeField, Tooltip("Multiplicateur de dégâts dans le noir pendant l'apocalypse")]
         private float apocalypseBoost = 1.25f;
+        [SerializeField, Tooltip("Multiplicateur de vitesse pendant l'apocalypse (plus nombreux, mais plus lents)")]
+        private float apocalypseSpeedFactor = 0.5f;
+        [SerializeField, Range(0f, 1f), Tooltip("Multiplicateur des dégâts de la lumière des phares pendant l'apocalypse")]
+        private float apocalypseBeaconDamageFactor = 0.5f;
 
         [Header("Perception")]
-        [SerializeField] private float detectionRange = 22f;
+        [SerializeField, Tooltip("Distance à laquelle il remarque le joueur (m)")] private float detectionRange = 10f;
+        [SerializeField, Tooltip("Une fois en traque, il ne lâche le joueur qu'au-delà de cette distance (m)")] private float loseRange = 16f;
         [SerializeField, Tooltip("Distance gardée au-delà du bord de la lumière en traque")] private float stalkMargin = 1.2f;
         [SerializeField, Tooltip("Secondes entre deux recalculs de trajet")] private float repathInterval = 0.1f;
         [SerializeField, Tooltip("Le joueur est préféré à un phare, sauf si le phare est au moins autant de fois plus proche")]
@@ -79,6 +87,17 @@ namespace IntoTheDark.Creatures
         [SerializeField, Min(1f), Tooltip("Au plus un coup par seconde et par monstre")] private float attackCooldown = 1f;
         [SerializeField, Tooltip("Durée max de la charge de panique avant d'abandonner")] private float panicTimeout = 3f;
         [SerializeField, Tooltip("Touché par une arme : durée max de la vengeance avant de fuir")] private float revengeTimeout = 3f;
+
+        [Header("Siège (apocalypse, joueur dans la lumière d'un phare)")]
+        [SerializeField, Tooltip("Distance gardée au-delà du bord de la lumière en tournant autour (m)")] private float siegeMargin = 1.5f;
+        [SerializeField, Tooltip("Avance (degrés) du point visé autour de la lumière")] private float siegeOrbitStep = 30f;
+        [SerializeField, Min(0f), Tooltip("Probabilité par seconde de se jeter sur le joueur")] private float siegeLungeChancePerSecond = 0.07f;
+        [SerializeField, Min(0f), Tooltip("Délai minimum entre deux tentatives d'un même rôdeur (s)")] private float siegeLungeCooldown = 5f;
+        [SerializeField, Min(1), Tooltip("Pendant l'apocalypse, nombre maximum de rôdeurs qui attaquent en même temps")]
+        private int maxApocalypseAttackers = 2;
+        [SerializeField, Tooltip("Joueur dans le noir : distance à laquelle les rôdeurs qui attendent leur tour tournent autour (m)")]
+        private float darkHoldDistance = 5f;
+        [SerializeField, Min(0.5f), Tooltip("Durée max d'une tentative avant de reprendre le siège (s)")] private float siegeLungeTimeout = 4f;
 
         [Header("Esquive (assaut et vengeance)")]
         [SerializeField, Tooltip("Distance du pas de côté (m)")] private float dashDistance = 1f;
@@ -130,6 +149,11 @@ namespace IntoTheDark.Creatures
         private float knockbackTimer;
         private float slideDuration = 0.2f;
         private float revengeTimer;
+        private float speedFactor = 1f;
+        private float orbitSign;
+        private float lungeTimer;
+        private float lungeCooldownTimer;
+        private float orbitStuckTimer;
         private float dashTimer;
         private Renderer[] bodyRenderers;
         private Color[] baseEmissions;
@@ -210,7 +234,9 @@ namespace IntoTheDark.Creatures
             var cycle = CycleManager.Instance;
             bool apocalypse = cycle != null && cycle.Phase == CyclePhase.Apocalypse;
             float boost = apocalypse && !LightZone.IsLit(BodyPoint) ? apocalypseBoost : 1f;
+            speedFactor = apocalypse ? apocalypseSpeedFactor : 1f;
 
+            if (!apocalypse) LeaveAttack();
             if (ForcedAssault || apocalypse)
             {
                 UpdateAssault(boost);
@@ -239,7 +265,9 @@ namespace IntoTheDark.Creatures
                 if (beaconHitTimer >= lightHitInterval)
                 {
                     beaconHitTimer -= lightHitInterval;
-                    Hurt(maxHealth * beaconDamageFraction, beacon.Zone.Center);
+                    var cycle = CycleManager.Instance;
+                    bool apocalypse = cycle != null && cycle.Phase == CyclePhase.Apocalypse;
+                    Hurt(maxHealth * beaconDamageFraction * (apocalypse ? apocalypseBeaconDamageFactor : 1f), beacon.Zone.Center);
                 }
                 return;
             }
@@ -293,7 +321,9 @@ namespace IntoTheDark.Creatures
             {
                 Vector3 target = transform.position + side * dashDistance;
                 if (NavMesh.Raycast(transform.position, target, out _, NavMesh.AllAreas)) continue; // mur
-                if (state != State.Assault && Beacon.AnyLitBeaconCovers(target + Vector3.up)) continue;
+                // Jamais dans la lumière d'un phare, sauf à l'assaut d'une tempête ou en se jetant sur le joueur.
+                bool mayEnterLight = state == State.Assault && (IsAttacker || !InApocalypse);
+                if (!mayEnterLight && Beacon.AnyLitBeaconCovers(target + Vector3.up)) continue;
                 StartSlide(side * dashDistance, dashDuration);
                 dashTimer = dashCooldown;
                 return;
@@ -334,6 +364,15 @@ namespace IntoTheDark.Creatures
             if (state == State.Dying || InAssaultMode) return;
             SetState(State.Revenge);
             revengeTimer = revengeTimeout;
+        }
+
+        private bool InApocalypse
+        {
+            get
+            {
+                var cycle = CycleManager.Instance;
+                return cycle != null && cycle.Phase == CyclePhase.Apocalypse;
+            }
         }
 
         private bool InAssaultMode
@@ -420,7 +459,8 @@ namespace IntoTheDark.Creatures
                 return;
             }
 
-            if (!Wounded && distance <= detectionRange)
+            float noticeRange = state == State.Stalk ? Mathf.Max(loseRange, detectionRange) : detectionRange;
+            if (!Wounded && distance <= noticeRange)
             {
                 SetState(State.Stalk);
                 UpdateStalk(distance);
@@ -562,8 +602,15 @@ namespace IntoTheDark.Creatures
         private void UpdateAssault(float boost)
         {
             SetState(State.Assault);
-            agent.speed = assaultSpeed * boost;
+            agent.speed = assaultSpeed * speedFactor;
             agent.updateRotation = true;
+
+            var cycle = CycleManager.Instance;
+            if (cycle != null && cycle.Phase == CyclePhase.Apocalypse)
+            {
+                UpdateApocalypse(boost);
+                return;
+            }
 
             float playerDistance = HasLivingPlayer() ? Vector3.Distance(transform.position, player.transform.position) : -1f;
             var beacon = Beacon.FindNearestLit(transform.position);
@@ -581,6 +628,104 @@ namespace IntoTheDark.Creatures
                 default:
                     UpdateWander(Time.deltaTime);
                     break;
+            }
+        }
+
+        // ---------- Apocalypse ----------
+
+        /// <summary>Rôdeurs qui attaquent en ce moment pendant l'apocalypse (2 au plus).</summary>
+        private static readonly HashSet<Lurker> apocalypseAttackers = new HashSet<Lurker>();
+
+        private bool IsAttacker => apocalypseAttackers.Contains(this);
+
+        private bool TryJoinAttack()
+        {
+            if (IsAttacker) return true;
+            if (apocalypseAttackers.Count >= maxApocalypseAttackers) return false;
+            apocalypseAttackers.Add(this);
+            lungeTimer = siegeLungeTimeout;
+            return true;
+        }
+
+        private void LeaveAttack() => apocalypseAttackers.Remove(this);
+
+        private void OnDisable() => LeaveAttack();
+
+        /// <summary>
+        /// Apocalypse : tous convergent vers le joueur, mais 2 au plus l'attaquent en même temps ; les autres
+        /// tournent autour en attendant leur tour.
+        /// - Joueur dans le noir : une place d'attaquant libre est prise aussitôt ; les autres rôdent à quelques mètres.
+        /// - Joueur dans la lumière d'un phare : ils tournent autour de cette lumière et, de temps en temps,
+        ///   l'un d'eux se jette sur le joueur à travers la lumière, puis reprend le siège s'il survit.
+        /// </summary>
+        private void UpdateApocalypse(float boost)
+        {
+            float dt = Time.deltaTime;
+            lungeCooldownTimer -= dt;
+            if (!HasLivingPlayer())
+            {
+                LeaveAttack();
+                UpdateWander(dt);
+                return;
+            }
+
+            Vector3 playerBody = playerLight != null ? playerLight.BodyPoint : player.transform.position + Vector3.up;
+            var beacon = Beacon.FindCovering(playerBody);
+
+            if (beacon == null)
+            {
+                // Joueur dans le noir : on attaque dès qu'une place se libère.
+                if (TryJoinAttack())
+                {
+                    lungeTimer = siegeLungeTimeout;
+                    MoveTo(player.transform.position);
+                    TryAttack(boost, ignoreLight: true);
+                }
+                else
+                {
+                    Orbit(player.transform.position, darkHoldDistance, dt, avoid: true);
+                }
+                return;
+            }
+
+            if (!IsAttacker && lungeCooldownTimer <= 0f && UnityEngine.Random.value < siegeLungeChancePerSecond * dt)
+                TryJoinAttack();
+
+            if (IsAttacker)
+            {
+                lungeTimer -= dt;
+                MoveTo(player.transform.position, avoid: false);
+                if (TryAttack(boost, ignoreLight: true) || lungeTimer <= 0f)
+                {
+                    LeaveAttack();
+                    lungeCooldownTimer = siegeLungeCooldown;
+                }
+                return;
+            }
+
+            // Siège : tourne autour de la lumière du phare, juste au-delà de son bord.
+            float radius = AvoidRadius(beacon, transform.position.y) - beaconAvoidMargin + siegeMargin;
+            Orbit(beacon.Zone.Center, radius, dt, avoid: true);
+        }
+
+        /// <summary>Tourne autour d'un point à cette distance, dans un sens tiré au hasard (inversé contre un mur).</summary>
+        private void Orbit(Vector3 center, float radius, float dt, bool avoid)
+        {
+            Vector3 fromCenter = transform.position - center;
+            fromCenter.y = 0f;
+            if (fromCenter.sqrMagnitude < 0.01f) fromCenter = Vector3.forward;
+            if (orbitSign == 0f) orbitSign = UnityEngine.Random.value < 0.5f ? -1f : 1f;
+            Vector3 target = center + Quaternion.Euler(0f, orbitSign * siegeOrbitStep, 0f) * fromCenter.normalized * radius;
+            target.y = transform.position.y;
+            MoveTo(target, avoid: avoid);
+
+            // Bloqué contre un mur plus d'une demi-seconde : on change de sens.
+            bool stuck = !agent.pathPending && agent.velocity.sqrMagnitude < 0.05f && agent.remainingDistance > 1f;
+            orbitStuckTimer = stuck ? orbitStuckTimer + dt : 0f;
+            if (orbitStuckTimer > 0.5f)
+            {
+                orbitSign = -orbitSign;
+                orbitStuckTimer = 0f;
             }
         }
 
@@ -677,6 +822,7 @@ namespace IntoTheDark.Creatures
         private void Die()
         {
             if (state == State.Dying) return;
+            LeaveAttack();
             SetState(State.Dying);
             health = 0f;
             deathTimer = deathDuration;
@@ -721,7 +867,8 @@ namespace IntoTheDark.Creatures
             return d.sqrMagnitude > 0f ? new Vector3(d.x, 0f, d.y) : Vector3.forward;
         }
 
-        private void MoveTo(Vector3 destination, bool force = false)
+        /// <param name="avoid">Contourner la lumière des phares ? Par défaut : oui, sauf à l'assaut.</param>
+        private void MoveTo(Vector3 destination, bool force = false, bool? avoid = null)
         {
             if (!force && repathTimer > 0f) return;
             repathTimer = repathInterval;
@@ -729,7 +876,7 @@ namespace IntoTheDark.Creatures
 
             // Hors assaut, la lumière des phares est infranchissable : destination repoussée au bord,
             // et trajet qui la contourne.
-            bool avoidBeacons = state != State.Assault;
+            bool avoidBeacons = avoid ?? state != State.Assault;
             if (avoidBeacons) destination = PushOutOfBeaconLight(destination);
 
             // Point hors du maillage (derrière un mur…) : on vise le point accessible le plus proche.

@@ -684,6 +684,8 @@ namespace IntoTheDark.EditorTools
             Decor("Torso", body, new Vector3(0f, 1f, 0.05f), new Vector3(0.62f, 0.5f, 0.5f), skin, PrimitiveType.Capsule)
                 .transform.localRotation = Quaternion.Euler(28f, 0f, 0f);
             Decor("Head", body, new Vector3(0f, 1.42f, 0.32f), new Vector3(0.36f, 0.32f, 0.4f), skin, PrimitiveType.Sphere);
+            var eyeRenderers = new Renderer[2];
+            int eyeIndex = 0;
             foreach (float side in new[] { -1f, 1f })
             {
                 Decor("Arm", body, new Vector3(0.36f * side, 0.82f, 0.28f), new Vector3(0.14f, 0.5f, 0.14f), skin, PrimitiveType.Capsule)
@@ -691,6 +693,7 @@ namespace IntoTheDark.EditorTools
                 Decor("Leg", body, new Vector3(0.17f * side, 0.36f, -0.05f), new Vector3(0.18f, 0.36f, 0.18f), skin, PrimitiveType.Capsule);
                 var eye = Decor("Eye", body, new Vector3(0.08f * side, 1.46f, 0.5f), Vector3.one * 0.065f, eyes, PrimitiveType.Sphere);
                 eye.GetComponent<Renderer>().shadowCastingMode = ShadowCastingMode.Off;
+                eyeRenderers[eyeIndex++] = eye.GetComponent<Renderer>();
             }
 
             var collider = root.AddComponent<CapsuleCollider>();
@@ -710,6 +713,12 @@ namespace IntoTheDark.EditorTools
             root.AddComponent<Lurker>();
             root.AddComponent<AudioSource>();
             root.AddComponent<CreatureVoice>();
+            var eyesGlow = new SerializedObject(root.AddComponent<LurkerEyes>());
+            var eyeList = eyesGlow.FindProperty("eyes");
+            eyeList.arraySize = eyeRenderers.Length;
+            for (int i = 0; i < eyeRenderers.Length; i++)
+                eyeList.GetArrayElementAtIndex(i).objectReferenceValue = eyeRenderers[i];
+            eyesGlow.ApplyModifiedPropertiesWithoutUndo();
 
             ProjectSetup.EnsureFolder(PrefabsFolder);
             var prefab = PrefabUtility.SaveAsPrefabAsset(root, LurkerPrefabPath);
